@@ -23,6 +23,7 @@ import Data.List
   , lines
   , nub
   , unwords
+  , words
   )
 import Data.Maybe (Maybe(..), isJust, listToMaybe, mapMaybe)
 import Data.Ord ((>))
@@ -63,7 +64,7 @@ import Xeno.DOM (Content(..), Node, children, contents, name, parse)
 data Opts =
   Opts
     { optsRelativeTo :: Maybe String
-    , optsRebuildSome :: Maybe String
+    , optsRebuildSome :: Maybe [String]
     , optsCreateCa :: Maybe String
     , optsClean :: Bool
     , optsStdout :: Bool
@@ -81,7 +82,10 @@ optsParser =
        (long "relative-to" <>
         help "rebuild only modules changed since the version specified")) <*>
   optional
-    (strOption (long "rebuild-some" <> help "rebuild only specific modules")) <*>
+    (words <$>
+     strOption
+       (long "rebuild" <>
+        help "rebuild this specific modules (and dependents thereof)")) <*>
   optional
     (strOption
        (long "create-ca" <>
@@ -147,16 +151,17 @@ prompt opts promptStr
       "n" -> pure False
       _ -> prompt opts promptStr
 
-rebuildSome :: FilePath -> Opts -> IO ()
-rebuildSome mod opts =
-  let realMod = "modules/" <> mod
-   in do result <-
-           mvnPretty
-             (optsStdout opts)
-             (mvnOpts opts <> ["install", "-pl", realMod])
-         whenSuccess result $ do
-           copyModule mod
-           notifySend $ "rebuild \"" <> mod <> "\" succeeded!"
+rebuildSome :: [String] -> Opts -> IO ()
+rebuildSome mods opts = do
+  let modPaths = intercalate "," (("modules/" <>) <$> mods)
+  result <-
+    mvnPretty
+      (optsStdout opts)
+      (mvnOpts opts <> ["install", "--projects", modPaths])
+  whenSuccess result $
+    forM_ mods $ \mod -> do
+      copyModule mod
+      notifySend $ "rebuild \"" <> unwords mods <> "\" succeeded!"
 
 copyModule :: FilePath -> IO ()
 copyModule mod = do
@@ -223,7 +228,7 @@ changedModules relativeTo = do
 
 mvnOpts :: Opts -> [String]
 mvnOpts opts =
-  ["-B"] <>
+  ["--batch-mode"] <>
   optStr (optsNoTests opts) "-DskipTests" <>
   optStr (optsNoCheckstyle opts) "-Dcheckstyle.skip" <>
   optStr (optsClean opts) "clean"
