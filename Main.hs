@@ -2,7 +2,7 @@
 {-# LANGUAGE NoImplicitPrelude #-}
 
 import Control.Applicative ((<*>), optional, pure)
-import Control.Monad ((>>), when)
+import Control.Monad ((>=>), (>>), when)
 import Data.Bool (Bool(..), (&&), (||), not, otherwise)
 import Data.ByteString (readFile)
 import qualified Data.ByteString.Char8 as BS8
@@ -46,7 +46,18 @@ import System.Directory (copyFile, findExecutable)
 import System.Environment (getEnv)
 import System.Exit (ExitCode(..))
 import System.FilePath (FilePath, (</>), splitPath)
-import System.IO (Handle, IO, getLine, hGetLine, hIsEOF, putStrLn)
+import System.IO
+  ( Handle
+  , IO
+  , IOMode(ReadMode, WriteMode)
+  , getLine
+  , hGetContents
+  , hGetLine
+  , hIsEOF
+  , hPutStrLn
+  , putStrLn
+  , withFile
+  )
 import System.Process
   ( ProcessHandle
   , StdStream(CreatePipe)
@@ -68,6 +79,7 @@ data Opts =
     , optsCreateCa :: Maybe String
     , optsClean :: Bool
     , optsStdout :: Bool
+    , optsShowLastLog :: Bool
     , optsYes :: Bool
     , optsNo :: Bool
     , optsNoCheckstyle :: Bool
@@ -92,6 +104,7 @@ optsParser =
         help "create a capture agent on the locally running instance")) <*>
   switch (long "clean" <> help "clean before build") <*>
   switch (long "stdout" <> help "output stdout, too") <*>
+  switch (long "show-last-log" <> help "show last log") <*>
   switch (long "yes" <> help "say \"yes\" to everything") <*>
   switch (long "no" <> help "say \"no\" to everything") <*>
   switch (long "no-checkstyle" <> help "disable checkstyle") <*>
@@ -245,33 +258,39 @@ fullRebuild opts = do
       (mvnOpts opts <> ["package", "install", "-Pdev"])
   whenSuccess result (notifySend "full rebuild success")
 
+lastLogFileName :: FilePath
+lastLogFileName = "last-log.txt"
+
 mvnPretty :: Bool -> [String] -> IO MvnResult
 mvnPretty stdout args = do
   putStrLn ("mvn " <> unwords args)
   (_, Just hout, _, processHandle) <-
     createProcess ((proc "mvn" args) {std_out = CreatePipe})
   errorLines <- newIORef []
-  errorCode <- mvnWithParse' hout processHandle errorLines
-  case errorCode of
-    ExitSuccess -> pure MvnResultOk
-    ExitFailure i -> do
-      notifySend $ "failure (code " <> show i <> ")!"
-      pure MvnResultFailure
+  withFile lastLogFileName WriteMode $ \lastLog -> do
+    errorCode <- mvnWithParse' hout lastLog processHandle errorLines
+    case errorCode of
+      ExitSuccess -> pure MvnResultOk
+      ExitFailure i -> do
+        notifySend $ "failure (code " <> show i <> ")!"
+        pure MvnResultFailure
   where
-    mvnWithParse' :: Handle -> ProcessHandle -> IORef [String] -> IO ExitCode
-    mvnWithParse' h p errLines = do
+    mvnWithParse' ::
+         Handle -> Handle -> ProcessHandle -> IORef [String] -> IO ExitCode
+    mvnWithParse' h lastLog p errLines = do
       eof <- hIsEOF h
       if eof
         then waitForProcess p
         else do
           line <- hGetLine h
+          hPutStrLn lastLog line
           let lineError :: Bool
               lineError = "[ERROR]" `isPrefixOf` line
               lineUpdate :: Bool
               lineUpdate = "[INFO] Building" `isPrefixOf` line
           when lineError (putStrLn line >> modifyIORef errLines (line :))
           when (lineUpdate || (stdout && not lineError)) (putStrLn line)
-          mvnWithParse' h p errLines
+          mvnWithParse' h lastLog p errLines
 
 createCa :: String -> IO ()
 createCa caName =
@@ -282,15 +301,17 @@ createCa caName =
 main :: IO ()
 main = do
   opts <- execParser (info (optsParser <**> helper) fullDesc)
-  case optsCreateCa opts of
-    Just caName -> createCa caName
-    Nothing -> do
-      when
-        (isJust (optsRebuildSome opts) && isJust (optsRelativeTo opts))
-        (error "can't specify some rebuild and relative rebuild")
-      case optsRebuildSome opts of
-        Just x -> rebuildSome x opts
-        _ ->
-          case optsRelativeTo opts of
-            Just x -> partialRebuild x opts
-            _ -> fullRebuild opts
+  if optsShowLastLog opts
+    then withFile lastLogFileName ReadMode (hGetContents >=> putStrLn)
+    else case optsCreateCa opts of
+           Just caName -> createCa caName
+           Nothing -> do
+             when
+               (isJust (optsRebuildSome opts) && isJust (optsRelativeTo opts))
+               (error "can't specify some rebuild and relative rebuild")
+             case optsRebuildSome opts of
+               Just x -> rebuildSome x opts
+               _ ->
+                 case optsRelativeTo opts of
+                   Just x -> partialRebuild x opts
+                   _ -> fullRebuild opts
