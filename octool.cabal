@@ -10,10 +10,14 @@ build-type:          Simple
 
 executable octool
   main-is:             Main.hs
-  -- other-modules:
-  -- other-extensions:
   build-depends:       base >=4.12 && <4.13
-  -- hs-source-dirs:
+                     , optparse-applicative
+                     , process
+                     , directory
+                     , xeno
+                     , bytestring
+                     , contravariant
+                     , filepath
   default-language:    Haskell2010
   build-tools:         hlint
                      , cabal-install

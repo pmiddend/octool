@@ -4,7 +4,9 @@ let
 
   inherit (nixpkgs) pkgs;
 
-  f = { mkDerivation, base, cabal-install, hindent, hlint, stdenv
+  f = { mkDerivation, base, bytestring, cabal-install
+      , contravariant, directory, hindent, hlint, optparse-applicative
+      , process, stdenv, xeno
       }:
       mkDerivation {
         pname = "octool";
@@ -12,7 +14,10 @@ let
         src = ./.;
         isLibrary = false;
         isExecutable = true;
-        executableHaskellDepends = [ base ];
+        executableHaskellDepends = [
+          base bytestring contravariant directory optparse-applicative
+          process xeno
+        ];
         executableToolDepends = [ cabal-install hindent hlint ];
         description = "Helper tool for building Opencast without hassle";
         license = "unknown";
