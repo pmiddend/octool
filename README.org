@@ -1,0 +1,29 @@
+* octool — building Opencast with style
+
+[[https://travis-ci.org/pmiddend/octool.svg?branch=master][https://travis-ci.org/pmiddend/octool.svg?branch=master]]
+
+** What is it?
+
+It’s a tool to help you build [[https://opencast.org][Opencast]]. If you don’t know what Opencast is, please do not read on.
+
+What’s the problem building Opencast, you say? It’s nothing major, really, but…
+
+- it has a /lot/ of stuff going to standard output and standard error.
+- you have to remember certain settings, like “how do I turn off tests again?”
+- building something “relative to a certain git version” is not possible“
+
+and a few other things that just annoyed me after a while, so I wrote this tool.
+
+** Installation
+
+Out of sheer lazyness (pun intended), I currently depend wholly on the [[https://nixos.org][Nix]] package manager to build it. With it, however, building it is trivial:
+
+#+begin_example
+nix-build
+#+end_example
+
+Without it…well, it’s not possible.
+
+** Usage
+
+Your working directory has to be the Opencast root directory. Then just call it, possibly with =--help= to discover its options. They should be self-explanatory.
