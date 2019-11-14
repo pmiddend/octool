@@ -54,7 +54,6 @@ import System.Process
   , createProcess
   , proc
   , readProcess
-  , spawnProcess
   , std_out
   , waitForProcess
   )
@@ -108,23 +107,13 @@ safefify p f = do
     Nothing -> error ("Couldn't find \"" <> p <> "\" in PATH")
     Just exe' -> f exe'
 
-safeSpawnProcess :: String -> [String] -> IO ProcessHandle
-safeSpawnProcess p args =
-  safefify p $ \command -> do
-    putStrLn $ "executing " <> command <> " " <> unwords args
-    spawnProcess command args
-
 safeReadProcess :: String -> [String] -> String -> IO String
 safeReadProcess p args input =
   safefify p $ \command -> readProcess command args input
 
-mvn :: [String] -> IO () -> IO ()
-mvn args f = do
-  handle <- safeSpawnProcess "mvn" args
-  exitCode <- waitForProcess handle
-  case exitCode of
-    ExitSuccess -> f
-    ExitFailure i -> notifySend ("mvn error (code " <> show i <> ")")
+data MvnResult
+  = MvnResultOk
+  | MvnResultFailure
 
 parseSafe :: FilePath -> IO Node
 parseSafe f = do
@@ -161,9 +150,13 @@ prompt opts promptStr
 rebuildSome :: FilePath -> Opts -> IO ()
 rebuildSome mod opts =
   let realMod = "modules/" <> mod
-   in mvnPretty (optsStdout opts) (mvnOpts opts <> ["install", "-pl", realMod]) $ do
-        copyModule mod
-        notifySend $ "rebuild \"" <> mod <> "\" succeeded!"
+   in do result <-
+           mvnPretty
+             (optsStdout opts)
+             (mvnOpts opts <> ["install", "-pl", realMod])
+         whenSuccess result $ do
+           copyModule mod
+           notifySend $ "rebuild \"" <> mod <> "\" succeeded!"
 
 copyModule :: FilePath -> IO ()
 copyModule mod = do
@@ -191,13 +184,16 @@ partialRebuild relativeTo opts = do
       else pure False
   if fullRebuild'
     then fullRebuild opts
-    else mvnPretty
-           (optsStdout opts)
-           (mvnOpts opts <>
-            ["install", "-pl", intercalate "," (("modules" </>) <$> mods)]) $ do
-           print mods
-           forM_ mods copyModule
-           notifySend "Partial rebuild complete"
+    else do
+      result <-
+        mvnPretty
+          (optsStdout opts)
+          (mvnOpts opts <>
+           ["install", "-pl", intercalate "," (("modules" </>) <$> mods)])
+      whenSuccess result $ do
+        print mods
+        forM_ mods copyModule
+        notifySend "Partial rebuild complete"
 
 gitDiff :: String -> IO [String]
 gitDiff relativeTo =
@@ -232,23 +228,30 @@ mvnOpts opts =
   optStr (optsNoCheckstyle opts) "-Dcheckstyle.skip" <>
   optStr (optsClean opts) "clean"
 
-fullRebuild :: Opts -> IO ()
-fullRebuild opts =
-  mvnPretty
-    (optsStdout opts)
-    (mvnOpts opts <> ["package", "install", "-Pdev"])
-    (notifySend "full rebuild success")
+whenSuccess :: MvnResult -> IO () -> IO ()
+whenSuccess MvnResultOk f = f
+whenSuccess _ _ = pure ()
 
-mvnPretty :: Bool -> [String] -> IO () -> IO ()
-mvnPretty stdout args f = do
+fullRebuild :: Opts -> IO ()
+fullRebuild opts = do
+  result <-
+    mvnPretty
+      (optsStdout opts)
+      (mvnOpts opts <> ["package", "install", "-Pdev"])
+  whenSuccess result (notifySend "full rebuild success")
+
+mvnPretty :: Bool -> [String] -> IO MvnResult
+mvnPretty stdout args = do
   putStrLn ("mvn " <> unwords args)
   (_, Just hout, _, processHandle) <-
     createProcess ((proc "mvn" args) {std_out = CreatePipe})
   errorLines <- newIORef []
   errorCode <- mvnWithParse' hout processHandle errorLines
   case errorCode of
-    ExitSuccess -> f
-    ExitFailure i -> notifySend $ "failure (code " <> show i <> ")!"
+    ExitSuccess -> pure MvnResultOk
+    ExitFailure i -> do
+      notifySend $ "failure (code " <> show i <> ")!"
+      pure MvnResultFailure
   where
     mvnWithParse' :: Handle -> ProcessHandle -> IORef [String] -> IO ExitCode
     mvnWithParse' h p errLines = do
