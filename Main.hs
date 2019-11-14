@@ -7,7 +7,7 @@ import Data.Bool (Bool(..), (&&), (||), not, otherwise)
 import Data.ByteString (readFile)
 import qualified Data.ByteString.Char8 as BS8
 import Data.Either (Either(..))
-import Data.Eq (Eq, (==))
+import Data.Eq (Eq, (/=), (==))
 import Data.Foldable (foldMap, forM_)
 import Data.Function (($), (.))
 import Data.Functor ((<$>))
@@ -285,7 +285,7 @@ mvnPretty stdout args = do
           line <- hGetLine h
           hPutStrLn lastLog line
           let lineError :: Bool
-              lineError = "[ERROR]" `isPrefixOf` line
+              lineError = "[ERROR]" `isPrefixOf` line && line /= "[ERROR] "
               lineUpdate :: Bool
               lineUpdate = "[INFO] Building" `isPrefixOf` line
           when lineError (putStrLn line >> modifyIORef errLines (line :))
