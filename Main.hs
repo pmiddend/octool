@@ -1,5 +1,5 @@
-{-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE NoImplicitPrelude #-}
+{-# LANGUAGE OverloadedStrings #-}
 
 import Control.Applicative ((<*>), optional, pure)
 import Control.Monad ((>=>), (>>), when)
@@ -44,7 +44,7 @@ import Options.Applicative
 import Prelude (error, print)
 import System.Directory (copyFile, findExecutable)
 import System.Environment (getEnv)
-import System.Exit (ExitCode(..))
+import System.Exit (ExitCode(..), exitWith)
 import System.FilePath (FilePath, (</>), splitPath)
 import System.IO
   ( Handle
@@ -164,7 +164,7 @@ prompt opts promptStr
       "n" -> pure False
       _ -> prompt opts promptStr
 
-rebuildSome :: [String] -> Opts -> IO ()
+rebuildSome :: [String] -> Opts -> IO ExitCode
 rebuildSome mods opts = do
   let modPaths = intercalate "," (("modules/" <>) <$> mods)
   result <-
@@ -193,7 +193,7 @@ copyModule mod = do
   putStrLn $ "copying " <> from <> " to " <> to
   copyFile from to
 
-partialRebuild :: String -> Opts -> IO ()
+partialRebuild :: String -> Opts -> IO ExitCode
 partialRebuild relativeTo opts = do
   (rebuildType, mods) <- changedModules relativeTo
   fullRebuild' <-
@@ -246,11 +246,11 @@ mvnOpts opts =
   optStr (optsNoCheckstyle opts) "-Dcheckstyle.skip" <>
   optStr (optsClean opts) "clean"
 
-whenSuccess :: MvnResult -> IO () -> IO ()
-whenSuccess MvnResultOk f = f
-whenSuccess _ _ = pure ()
+whenSuccess :: MvnResult -> IO () -> IO ExitCode
+whenSuccess MvnResultOk f = f >> pure ExitSuccess
+whenSuccess _ _ = pure (ExitFailure 1)
 
-fullRebuild :: Opts -> IO ()
+fullRebuild :: Opts -> IO ExitCode
 fullRebuild opts = do
   result <-
     mvnPretty
@@ -292,17 +292,19 @@ mvnPretty stdout args = do
           when (lineUpdate || (stdout && not lineError)) (putStrLn line)
           mvnWithParse' h lastLog p errLines
 
-createCa :: String -> IO ()
-createCa caName =
+createCa :: String -> IO ExitCode
+createCa caName = do
   callCommand $
-  "curl -i -s -f --digest -u opencast_system_account:CHANGE_ME --request POST -H \"X-Requested-Auth: Digest\" --data state=idle 'http://localhost:8080/capture-admin/agents/" <>
-  caName <> "'"
+    "curl -i -s -f --digest -u opencast_system_account:CHANGE_ME --request POST -H \"X-Requested-Auth: Digest\" --data state=idle 'http://localhost:8080/capture-admin/agents/" <>
+    caName <> "'"
+  pure ExitSuccess
 
-main :: IO ()
-main = do
+main' :: IO ExitCode
+main' = do
   opts <- execParser (info (optsParser <**> helper) fullDesc)
   if optsShowLastLog opts
-    then withFile lastLogFileName ReadMode (hGetContents >=> putStrLn)
+    then withFile lastLogFileName ReadMode (hGetContents >=> putStrLn) >>
+         pure ExitSuccess
     else case optsCreateCa opts of
            Just caName -> createCa caName
            Nothing -> do
@@ -315,3 +317,8 @@ main = do
                  case optsRelativeTo opts of
                    Just x -> partialRebuild x opts
                    _ -> fullRebuild opts
+
+main :: IO ()
+main = do
+  ec <- main'
+  exitWith ec
