@@ -25,7 +25,7 @@ import Data.List
   , unwords
   , words
   )
-import Data.Maybe (Maybe(..), isJust, listToMaybe, mapMaybe)
+import Data.Maybe (Maybe(..), fromMaybe, isJust, listToMaybe, mapMaybe)
 import Data.Ord ((>))
 import Data.Semigroup ((<>))
 import Data.String (String)
@@ -72,11 +72,14 @@ import System.Process
 import Text.Show (show)
 import Xeno.DOM (Content(..), Node, children, contents, name, parse)
 
+type Assembly = String
+
 data Opts =
   Opts
     { optsRelativeTo :: Maybe String
     , optsRebuildSome :: Maybe [String]
     , optsCreateCa :: Maybe String
+    , optsTargetAssembly :: Maybe Assembly
     , optsClean :: Bool
     , optsStdout :: Bool
     , optsShowLastLog :: Bool
@@ -102,6 +105,10 @@ optsParser =
     (strOption
        (long "create-ca" <>
         help "create a capture agent on the locally running instance")) <*>
+  optional
+    (strOption
+       (long "target-assembly" <>
+        help "use the specified assembly instead of develop")) <*>
   switch (long "clean" <> help "clean before build") <*>
   switch (long "stdout" <> help "output stdout, too") <*>
   switch (long "show-last-log" <> help "show last log") <*>
@@ -164,8 +171,8 @@ prompt opts promptStr
       "n" -> pure False
       _ -> prompt opts promptStr
 
-rebuildSome :: [String] -> Opts -> IO ExitCode
-rebuildSome mods opts = do
+rebuildSome :: Maybe Assembly -> [String] -> Opts -> IO ExitCode
+rebuildSome targetAssembly mods opts = do
   let modPaths = intercalate "," (("modules/" <>) <$> mods)
   result <-
     mvnPretty
@@ -173,14 +180,15 @@ rebuildSome mods opts = do
       (mvnOpts opts <> ["install", "--projects", modPaths])
   whenSuccess result $
     forM_ mods $ \mod -> do
-      copyModule mod
+      copyModule targetAssembly mod
       notifySend $ "rebuild \"" <> unwords mods <> "\" succeeded!"
 
-copyModule :: FilePath -> IO ()
-copyModule mod = do
+copyModule :: Maybe Assembly -> FilePath -> IO ()
+copyModule targetAssemblyOpt mod = do
   home <- getEnv "HOME"
   version <- getVersion
-  let ocPath :: FilePath
+  let targetAssembly = fromMaybe ("develop-" <> version) targetAssemblyOpt
+      ocPath :: FilePath
       ocPath =
         "org" </> "opencastproject" </> ("opencast-" <> mod) </> version </>
         ("opencast-" <> mod <> "-" <> version <> ".jar")
@@ -188,8 +196,7 @@ copyModule mod = do
       from = home </> ".m2" </> "repository" </> ocPath
       to :: FilePath
       to =
-        "build" </> ("opencast-dist-develop-" <> version) </> "system" </>
-        ocPath
+        "build" </> ("opencast-dist-" <> targetAssembly) </> "system" </> ocPath
   putStrLn $ "copying " <> from <> " to " <> to
   copyFile from to
 
@@ -210,7 +217,7 @@ partialRebuild relativeTo opts = do
            ["install", "-pl", intercalate "," (("modules" </>) <$> mods)])
       whenSuccess result $ do
         print mods
-        forM_ mods copyModule
+        forM_ mods (copyModule Nothing)
         notifySend "Partial rebuild complete"
 
 gitDiff :: String -> IO [String]
@@ -312,7 +319,7 @@ main' = do
                (isJust (optsRebuildSome opts) && isJust (optsRelativeTo opts))
                (error "can't specify some rebuild and relative rebuild")
              case optsRebuildSome opts of
-               Just x -> rebuildSome x opts
+               Just x -> rebuildSome (optsTargetAssembly opts) x opts
                _ ->
                  case optsRelativeTo opts of
                    Just x -> partialRebuild x opts
