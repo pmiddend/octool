@@ -26,4 +26,27 @@ Without it…well, it’s not possible.
 
 ** Usage
 
-Your working directory has to be the Opencast root directory. Then just call it, possibly with =--help= to discover its options. They should be self-explanatory.
+Your working directory has to be the Opencast root directory. Then just call it, possibly with =--help= to discover its options. They should be self-explanatory:
+
+#+begin_example
+Usage: octool [--relative-to ARG] [--rebuild ARG] [--create-ca ARG]
+              [--target-assembly ARG] [--clean] [--stdout] [--show-last-log]
+              [--yes] [--no] [--no-checkstyle] [--no-tests]
+
+Available options:
+  --relative-to ARG        rebuild only modules changed since the version
+                           specified
+  --rebuild ARG            rebuild this specific modules (and dependents
+                           thereof)
+  --create-ca ARG          create a capture agent on the locally running
+                           instance
+  --target-assembly ARG    use the specified assembly instead of develop
+  --clean                  clean before build
+  --stdout                 output stdout, too
+  --show-last-log          show last log
+  --yes                    say "yes" to everything
+  --no                     say "no" to everything
+  --no-checkstyle          disable checkstyle
+  --no-tests               disable tests
+  -h,--help                Show this help text
+#+end_example
