@@ -13,7 +13,7 @@
 {-# LANGUAGE TypeOperators #-}
 
 import Control.Applicative ((<*>), optional, pure)
-import Control.Monad (Monad, (>=>), (>>), (>>=), when)
+import Control.Monad (Monad, (>=>), (>>), when)
 import Data.Bool (Bool(..), (&&), (||), not, otherwise)
 import Data.ByteString (ByteString, readFile)
 import qualified Data.ByteString.Char8 as BS8
@@ -43,13 +43,16 @@ import Data.String (String)
 import Options.Applicative
   ( Parser
   , (<**>)
+  , command
   , execParser
   , fullDesc
   , help
   , helper
   , info
   , long
+  , progDesc
   , strOption
+  , subparser
   , switch
   )
 import Polysemy (Embed, Member, Members, Sem, embed, interpret, makeSem, runM)
@@ -94,48 +97,78 @@ import Xeno.Types (XenoException)
 
 type Assembly = String
 
-data Opts =
-  Opts
-    { optsRelativeTo :: Maybe String
-    , optsRebuildSome :: Maybe [String]
-    , optsCreateCa :: Maybe String
-    , optsTargetAssembly :: Maybe Assembly
-    , optsClean :: Bool
-    , optsStdout :: Bool
-    , optsShowLastLog :: Bool
-    , optsYes :: Bool
-    , optsNo :: Bool
-    , optsNoCheckstyle :: Bool
-    , optsNoTests :: Bool
+newtype CaOptions =
+  CaOptions
+    { caName :: String
     }
 
+data RebuildOptions =
+  RebuildOptions
+    { rebRelativeTo :: Maybe String
+    , rebClean :: Bool
+    , rebRebuildSome :: Maybe [String]
+    , rebStdout :: Bool
+    , rebYes :: Bool
+    , rebNo :: Bool
+    , rebNoCheckstyle :: Bool
+    , rebNoTests :: Bool
+    , rebTargetAssembly :: Maybe String
+    }
+
+data Opts
+  = CreateCa CaOptions
+  | ShowLastLog
+  | Rebuild RebuildOptions
+
 optsParser :: Parser Opts
-optsParser =
-  Opts <$>
-  optional
-    (strOption
-       (long "relative-to" <>
-        help "rebuild only modules changed since the version specified")) <*>
-  optional
-    (words <$>
-     strOption
-       (long "rebuild" <>
-        help "rebuild this specific modules (and dependents thereof)")) <*>
-  optional
-    (strOption
-       (long "create-ca" <>
-        help "create a capture agent on the locally running instance")) <*>
-  optional
-    (strOption
-       (long "target-assembly" <>
-        help "use the specified assembly instead of develop")) <*>
-  switch (long "clean" <> help "clean before build") <*>
-  switch (long "stdout" <> help "output stdout, too") <*>
-  switch (long "show-last-log" <> help "show last log") <*>
-  switch (long "yes" <> help "say \"yes\" to everything") <*>
-  switch (long "no" <> help "say \"no\" to everything") <*>
-  switch (long "no-checkstyle" <> help "disable checkstyle") <*>
-  switch (long "no-tests" <> help "disable tests")
+optsParser = subparser (createCaCommand <> showLastLogCommand <> rebuildCommand)
+  where
+    createCaCommand =
+      command
+        "create-ca"
+        (info
+           (createCaOptions <**> helper)
+           (progDesc "create a new capture agent"))
+    showLastLogCommand =
+      command
+        "show-last-log"
+        (info
+           (pure ShowLastLog <**> helper)
+           (progDesc "show the last (re-)build log"))
+    rebuildCommand =
+      command
+        "rebuild"
+        (info
+           (rebuildOptions <**> helper)
+           (progDesc "rebuild parts of (or all of) Opencast"))
+    createCaOptions =
+      CreateCa <$>
+      (CaOptions <$>
+       strOption
+         (long "create-ca" <>
+          help "create a capture agent on the locally running instance"))
+    rebuildOptions =
+      Rebuild <$>
+      (RebuildOptions <$>
+       optional
+         (strOption
+            (long "relative-to" <>
+             help "rebuild only modules changed since the version specified")) <*>
+       switch (long "clean" <> help "clean before build") <*>
+       optional
+         (words <$>
+          strOption
+            (long "rebuild" <>
+             help "rebuild this specific modules (and dependents thereof)")) <*>
+       switch (long "stdout" <> help "output stdout, too") <*>
+       switch (long "yes" <> help "say \"yes\" to everything") <*>
+       switch (long "no" <> help "say \"no\" to everything") <*>
+       switch (long "no-checkstyle" <> help "disable checkstyle") <*>
+       switch (long "no-tests" <> help "disable tests") <*>
+       optional
+         (strOption
+            (long "target-assembly" <>
+             help "use the specified assembly instead of develop")))
 
 optStr :: Bool -> String -> [String]
 optStr True x = [x]
@@ -175,10 +208,13 @@ runConstantPrompt b =
     MyPrompt _ -> pure b
 
 runPrompt ::
-     Member (Embed IO) r => Opts -> Sem (PromptSemantics : r) a -> Sem r a
+     Member (Embed IO) r
+  => RebuildOptions
+  -> Sem (PromptSemantics : r) a
+  -> Sem r a
 runPrompt opts
-  | optsYes opts = runConstantPrompt True
-  | optsNo opts = runConstantPrompt False
+  | rebYes opts = runConstantPrompt True
+  | rebNo opts = runConstantPrompt False
   | otherwise = runInteractivePrompt
 
 data FileSemantics m a where
@@ -265,8 +301,7 @@ safeReadProcess ::
   -> [String]
   -> String
   -> Sem r String
-safeReadProcess p args input =
-  safefify p $ \command -> myReadProcess command args input
+safeReadProcess p args input = safefify p $ \cmd -> myReadProcess cmd args input
 
 data MvnResult
   = MvnResultOk
@@ -298,7 +333,7 @@ getVersion = do
     Just version -> pure (BS8.unpack (nodeContent version))
 
 rebuildSome ::
-     Members '[ Reader Opts, XmlSemantics, LogSemantics, FileSemantics, ProcessSemantics, Resource, Error String, Fail] r
+     Members '[ Reader RebuildOptions, XmlSemantics, LogSemantics, FileSemantics, ProcessSemantics, Resource, Error String, Fail] r
   => [String]
   -> Sem r ExitCode
 rebuildSome mods = do
@@ -306,11 +341,11 @@ rebuildSome mods = do
   opts <- ask
   result <-
     mvnPretty
-      (optsStdout opts)
+      (rebStdout opts)
       (mvnOpts opts <> ["install", "--projects", modPaths])
   whenSuccess result $
     forM_ mods $ \mod -> do
-      copyModule (optsTargetAssembly opts) mod
+      copyModule (rebTargetAssembly opts) mod
       notifySend $ "rebuild \"" <> unwords mods <> "\" succeeded!"
 
 copyModule ::
@@ -335,7 +370,7 @@ copyModule targetAssemblyOpt mod = do
   myCopyFile from to
 
 partialRebuild ::
-     Members '[ Reader Opts, XmlSemantics, FileSemantics, Resource, Fail, LogSemantics, Error String, ProcessSemantics, PromptSemantics] r
+     Members '[ Reader RebuildOptions, XmlSemantics, FileSemantics, Resource, Fail, LogSemantics, Error String, ProcessSemantics, PromptSemantics] r
   => String
   -> Sem r ExitCode
 partialRebuild relativeTo = do
@@ -345,12 +380,12 @@ partialRebuild relativeTo = do
       then myPrompt "\"pom.xml\" changed, do a full rebuild?"
       else pure False
   if fullRebuild'
-    then ask >>= fullRebuild
+    then fullRebuild
     else do
       opts <- ask
       result <-
         mvnPretty
-          (optsStdout opts)
+          (rebStdout opts)
           (mvnOpts opts <>
            ["install", "-pl", intercalate "," (("modules" </>) <$> mods)])
       whenSuccess result $ do
@@ -388,26 +423,24 @@ changedModules relativeTo = do
         else PartialRebuild
     , modules)
 
-mvnOpts :: Opts -> [String]
+mvnOpts :: RebuildOptions -> [String]
 mvnOpts opts =
   ["--batch-mode"] <>
-  optStr (optsNoTests opts) "-DskipTests" <>
-  optStr (optsNoCheckstyle opts) "-Dcheckstyle.skip" <>
-  optStr (optsClean opts) "clean"
+  optStr (rebNoTests opts) "-DskipTests" <>
+  optStr (rebNoCheckstyle opts) "-Dcheckstyle.skip" <>
+  optStr (rebClean opts) "clean"
 
 whenSuccess :: Monad m => MvnResult -> m () -> m ExitCode
 whenSuccess MvnResultOk f = f >> pure ExitSuccess
 whenSuccess _ _ = pure (ExitFailure 1)
 
 fullRebuild ::
-     Members '[ LogSemantics, FileSemantics, ProcessSemantics, Resource, Fail] r
-  => Opts
-  -> Sem r ExitCode
-fullRebuild opts = do
+     Members '[ Reader RebuildOptions, LogSemantics, FileSemantics, ProcessSemantics, Resource, Fail] r
+  => Sem r ExitCode
+fullRebuild = do
+  opts <- ask
   result <-
-    mvnPretty
-      (optsStdout opts)
-      (mvnOpts opts <> ["package", "install", "-Pdev"])
+    mvnPretty (rebStdout opts) (mvnOpts opts <> ["package", "install", "-Pdev"])
   whenSuccess result (notifySend "full rebuild success")
 
 lastLogFileName :: FilePath
@@ -454,57 +487,58 @@ mvnWithParse' stdout h lastLog p errLines = do
       when (lineUpdate || (stdout && not lineError)) (myLog line)
       mvnWithParse' stdout h lastLog p errLines
 
-createCa :: Member ProcessSemantics r => String -> Sem r ExitCode
-createCa caName = do
+createCa :: Member ProcessSemantics r => CaOptions -> Sem r ExitCode
+createCa caOpts = do
   myCallCommand $
     "curl -i -s -f --digest -u opencast_system_account:CHANGE_ME --request POST -H \"X-Requested-Auth: Digest\" --data state=idle 'http://localhost:8080/capture-admin/agents/" <>
-    caName <> "'"
+    caName caOpts <> "'"
   pure ExitSuccess
 
 main' :: IO ExitCode
 main' = do
   opts <- execParser (info (optsParser <**> helper) fullDesc)
-  if optsShowLastLog opts
-    then withFile lastLogFileName ReadMode (hGetContents >=> putStrLn) >>
-         pure ExitSuccess
-    else case optsCreateCa opts of
-           Just caName -> createCa caName & runProcessSemantics & runM
-           Nothing -> do
-             when
-               (isJust (optsRebuildSome opts) && isJust (optsRelativeTo opts))
-               (error "can't specify some rebuild and relative rebuild")
-             errorOrExitCode <-
-               case optsRebuildSome opts of
-                 Just x ->
-                   rebuildSome x & runXml & runReader opts & runLog &
-                   runFileSemantics &
-                   runProcessSemantics &
-                   failToError id &
-                   runError &
-                   resourceToIO &
-                   runM
-                 _ ->
-                   case optsRelativeTo opts of
-                     Just x ->
-                       partialRebuild x & runReader opts & runXml & runLog &
-                       runFileSemantics &
-                       runProcessSemantics &
-                       runPrompt opts &
-                       failToError id &
-                       runError &
-                       resourceToIO &
-                       runM
-                     _ ->
-                       fullRebuild opts & runXml & runLog & runFileSemantics &
-                       runProcessSemantics &
-                       runPrompt opts &
-                       failToError id &
-                       runError &
-                       resourceToIO &
-                       runM
-             case errorOrExitCode of
-               Left e -> error e
-               Right ec -> pure ec
+  case opts of
+    ShowLastLog -> do
+      withFile lastLogFileName ReadMode (hGetContents >=> putStrLn)
+      pure ExitSuccess
+    CreateCa caOpts -> createCa caOpts & runProcessSemantics & runM
+    Rebuild rebOpts -> do
+      when
+        (isJust (rebRebuildSome rebOpts) && isJust (rebRelativeTo rebOpts))
+        (error "can't specify some rebuild and relative rebuild")
+      errorOrExitCode <-
+        case rebRebuildSome rebOpts of
+          Just x ->
+            rebuildSome x & runXml & runReader rebOpts & runLog &
+            runFileSemantics &
+            runProcessSemantics &
+            failToError id &
+            runError &
+            resourceToIO &
+            runM
+          _ ->
+            case rebRelativeTo rebOpts of
+              Just x ->
+                partialRebuild x & runReader rebOpts & runXml & runLog &
+                runFileSemantics &
+                runProcessSemantics &
+                runPrompt rebOpts &
+                failToError id &
+                runError &
+                resourceToIO &
+                runM
+              _ ->
+                fullRebuild & runReader rebOpts & runXml & runLog &
+                runFileSemantics &
+                runProcessSemantics &
+                runPrompt rebOpts &
+                failToError id &
+                runError &
+                resourceToIO &
+                runM
+      case errorOrExitCode of
+        Left e -> error e
+        Right ec -> pure ec
 
 main :: IO ()
 main = do
