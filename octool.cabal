@@ -17,6 +17,7 @@ executable octool
                      , xeno
                      , bytestring
                      , filepath
+                     , polysemy
   default-language:    Haskell2010
   build-tools:         hlint
                      , cabal-install

@@ -4,9 +4,9 @@ let
 
   inherit (nixpkgs) pkgs;
 
-  f = { mkDerivation, base, bytestring, cabal-install
-      , contravariant, directory, hindent, hlint, optparse-applicative
-      , process, stdenv, xeno
+  f = { mkDerivation, base, bytestring, cabal-install, directory
+      , filepath, hindent, hlint, optparse-applicative, polysemy, process
+      , stdenv, xeno
       }:
       mkDerivation {
         pname = "octool";
@@ -15,7 +15,7 @@ let
         isLibrary = false;
         isExecutable = true;
         executableHaskellDepends = [
-          base bytestring contravariant directory optparse-applicative
+          base bytestring directory filepath optparse-applicative polysemy
           process xeno
         ];
         executableToolDepends = [ cabal-install hindent hlint ];

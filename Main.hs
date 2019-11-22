@@ -1,15 +1,26 @@
+{-# LANGUAGE DataKinds #-}
+{-# LANGUAGE FlexibleContexts #-}
+{-# LANGUAGE GADTs #-}
+{-# LANGUAGE LambdaCase #-}
 {-# LANGUAGE NoImplicitPrelude #-}
 {-# LANGUAGE OverloadedStrings #-}
+{-# LANGUAGE PolyKinds #-}
+{-# LANGUAGE RankNTypes #-}
+{-# LANGUAGE ScopedTypeVariables #-}
+{-# LANGUAGE TemplateHaskell #-}
+{-# LANGUAGE TypeApplications #-}
+{-# LANGUAGE TypeFamilies #-}
+{-# LANGUAGE TypeOperators #-}
 
 import Control.Applicative ((<*>), optional, pure)
-import Control.Monad ((>=>), (>>), when)
+import Control.Monad (Monad, (>=>), (>>), (>>=), when)
 import Data.Bool (Bool(..), (&&), (||), not, otherwise)
-import Data.ByteString (readFile)
+import Data.ByteString (ByteString, readFile)
 import qualified Data.ByteString.Char8 as BS8
 import Data.Either (Either(..))
 import Data.Eq (Eq, (/=), (==))
 import Data.Foldable (foldMap, forM_)
-import Data.Function (($), (.))
+import Data.Function (($), (&), (.), id)
 import Data.Functor ((<$>))
 import Data.IORef (IORef, modifyIORef, newIORef)
 import Data.List
@@ -41,7 +52,12 @@ import Options.Applicative
   , strOption
   , switch
   )
-import Prelude (error, print)
+import Polysemy (Embed, Member, Members, Sem, embed, interpret, makeSem, runM)
+import Polysemy.Error (Error, runError, throw)
+import Polysemy.Fail (Fail, failToError)
+import Polysemy.Reader (Reader, ask, runReader)
+import Polysemy.Resource (Resource, bracket, resourceToIO)
+import Prelude (error)
 import System.Directory (copyFile, findExecutable)
 import System.Environment (getEnv)
 import System.Exit (ExitCode(..), exitWith)
@@ -51,15 +67,18 @@ import System.IO
   , IO
   , IOMode(ReadMode, WriteMode)
   , getLine
+  , hClose
   , hGetContents
   , hGetLine
   , hIsEOF
   , hPutStrLn
+  , openFile
   , putStrLn
   , withFile
   )
 import System.Process
-  ( ProcessHandle
+  ( CreateProcess
+  , ProcessHandle
   , StdStream(CreatePipe)
   , callCommand
   , callProcess
@@ -71,6 +90,7 @@ import System.Process
   )
 import Text.Show (show)
 import Xeno.DOM (Content(..), Node, children, contents, name, parse)
+import Xeno.Types (XenoException)
 
 type Assembly = String
 
@@ -121,29 +141,146 @@ optStr :: Bool -> String -> [String]
 optStr True x = [x]
 optStr False _ = []
 
-notifySend :: String -> IO ()
-notifySend x = callProcess "notify-send" [x]
+data LogSemantics m a where
+  MyLog :: String -> LogSemantics m ()
 
-safefify :: String -> (FilePath -> IO b) -> IO b
+makeSem ''LogSemantics
+
+runLog :: Member (Embed IO) r => Sem (LogSemantics : r) a -> Sem r a
+runLog =
+  interpret $ \case
+    MyLog s -> embed (putStrLn s)
+
+data PromptSemantics m a where
+  MyPrompt :: String -> PromptSemantics m Bool
+
+makeSem ''PromptSemantics
+
+runInteractivePrompt ::
+     Member (Embed IO) r => Sem (PromptSemantics : r) a -> Sem r a
+runInteractivePrompt =
+  interpret $ \case
+    MyPrompt promptStr' -> f promptStr'
+      where f promptStr = do
+              embed (putStrLn (promptStr <> " [yn]"))
+              line <- embed getLine
+              case line of
+                "y" -> pure True
+                "n" -> pure False
+                _ -> f promptStr
+
+runConstantPrompt :: Bool -> Sem (PromptSemantics : r) a -> Sem r a
+runConstantPrompt b =
+  interpret $ \case
+    MyPrompt _ -> pure b
+
+runPrompt ::
+     Member (Embed IO) r => Opts -> Sem (PromptSemantics : r) a -> Sem r a
+runPrompt opts
+  | optsYes opts = runConstantPrompt True
+  | optsNo opts = runConstantPrompt False
+  | otherwise = runInteractivePrompt
+
+data FileSemantics m a where
+  MyReadFile :: FilePath -> FileSemantics m ByteString
+  MyNewIORef :: a -> FileSemantics m (IORef a)
+  MyHClose :: Handle -> FileSemantics m ()
+  MyOpenFile :: FilePath -> IOMode -> FileSemantics m Handle
+  MyModifyIORef :: IORef a -> (a -> a) -> FileSemantics m ()
+  MyHIsEOF :: Handle -> FileSemantics m Bool
+  MyHGetLine :: Handle -> FileSemantics m String
+  MyHPutStrLn :: Handle -> String -> FileSemantics m ()
+  MyGetEnv :: String -> FileSemantics m String
+  MyCopyFile :: FilePath -> FilePath -> FileSemantics m ()
+
+makeSem ''FileSemantics
+
+runFileSemantics :: Member (Embed IO) r => Sem (FileSemantics : r) a -> Sem r a
+runFileSemantics =
+  interpret $ \case
+    MyReadFile fp -> embed (readFile fp)
+    MyNewIORef a -> embed (newIORef a)
+    MyHClose h -> embed (hClose h)
+    MyOpenFile fp mode -> embed (openFile fp mode)
+    MyModifyIORef ref f -> embed (modifyIORef ref f)
+    MyHIsEOF h -> embed (hIsEOF h)
+    MyHGetLine h -> embed (hGetLine h)
+    MyHPutStrLn h s -> embed (hPutStrLn h s)
+    MyGetEnv h -> embed (getEnv h)
+    MyCopyFile s d -> embed (copyFile s d)
+
+data XmlSemantics m a where
+  MyParseString :: ByteString -> XmlSemantics m (Either XenoException Node)
+
+makeSem ''XmlSemantics
+
+runXml :: Sem (XmlSemantics : r) a -> Sem r a
+runXml =
+  interpret $ \case
+    MyParseString s -> pure (parse s)
+
+data ProcessSemantics m a where
+  MyReadProcess :: String -> [String] -> String -> ProcessSemantics m String
+  MyCallProcess :: FilePath -> [String] -> ProcessSemantics m ()
+  MyCallCommand :: String -> ProcessSemantics m ()
+  MyFindExecutable :: String -> ProcessSemantics m (Maybe FilePath)
+  MyWaitForProcess :: ProcessHandle -> ProcessSemantics m ExitCode
+  MyCreateProcess
+    :: CreateProcess
+    -> ProcessSemantics m ( Maybe Handle
+                          , Maybe Handle
+                          , Maybe Handle
+                          , ProcessHandle)
+
+makeSem ''ProcessSemantics
+
+runProcessSemantics ::
+     Member (Embed IO) r => Sem (ProcessSemantics : r) a -> Sem r a
+runProcessSemantics =
+  interpret $ \case
+    MyReadProcess s args input -> embed (readProcess s args input)
+    MyCallProcess f args -> embed (callProcess f args)
+    MyCallCommand s -> embed (callCommand s)
+    MyFindExecutable f -> embed (findExecutable f)
+    MyWaitForProcess h -> embed (waitForProcess h)
+    MyCreateProcess cp -> embed (createProcess cp)
+
+notifySend :: Member ProcessSemantics r => String -> Sem r ()
+notifySend x = myCallProcess "notify-send" [x]
+
+safefify ::
+     Members '[ ProcessSemantics, Error String] r
+  => String
+  -> (FilePath -> Sem r b)
+  -> Sem r b
 safefify p f = do
-  exe <- findExecutable p
+  exe <- myFindExecutable p
   case exe of
-    Nothing -> error ("Couldn't find \"" <> p <> "\" in PATH")
+    Nothing -> throw ("Couldn't find \"" <> p <> "\" in PATH")
     Just exe' -> f exe'
 
-safeReadProcess :: String -> [String] -> String -> IO String
+safeReadProcess ::
+     Members '[ ProcessSemantics, Error String] r
+  => String
+  -> [String]
+  -> String
+  -> Sem r String
 safeReadProcess p args input =
-  safefify p $ \command -> readProcess command args input
+  safefify p $ \command -> myReadProcess command args input
 
 data MvnResult
   = MvnResultOk
   | MvnResultFailure
 
-parseSafe :: FilePath -> IO Node
+parseSafe ::
+     Members '[ XmlSemantics, FileSemantics, Error String] r
+  => FilePath
+  -> Sem r Node
 parseSafe f = do
-  c <- readFile f
-  case parse c of
-    Left e -> error $ "error parsing \"" <> f <> "\": " <> show e
+  c <- myReadFile f
+  p <- myParseString c
+  case p of
+    Left e -> throw ("error parsing \"" <> f <> "\": " <> show e)
     Right v -> pure v
 
 nodeContent :: Node -> BS8.ByteString
@@ -152,40 +289,37 @@ nodeContent n = foldMap contentToText (contents n)
     contentToText (Text x) = x
     contentToText _ = ""
 
-getVersion :: IO String
+getVersion ::
+     Members '[ XmlSemantics, FileSemantics, Error String] r => Sem r String
 getVersion = do
   pom <- parseSafe "pom.xml"
   case listToMaybe (filter ((== "version") . name) (children pom)) of
-    Nothing -> error "couldn't find \"version\" in pom.xml"
+    Nothing -> throw ("couldn't find \"version\" in pom.xml" :: String)
     Just version -> pure (BS8.unpack (nodeContent version))
 
-prompt :: Opts -> String -> IO Bool
-prompt opts promptStr
-  | optsYes opts = pure True
-  | optsNo opts = pure False
-  | otherwise = do
-    putStrLn (promptStr <> " [yn]")
-    line <- getLine
-    case line of
-      "y" -> pure True
-      "n" -> pure False
-      _ -> prompt opts promptStr
-
-rebuildSome :: Maybe Assembly -> [String] -> Opts -> IO ExitCode
-rebuildSome targetAssembly mods opts = do
+rebuildSome ::
+     Members '[ Reader Opts, XmlSemantics, LogSemantics, FileSemantics, ProcessSemantics, Resource, Error String, Fail] r
+  => [String]
+  -> Sem r ExitCode
+rebuildSome mods = do
   let modPaths = intercalate "," (("modules/" <>) <$> mods)
+  opts <- ask
   result <-
     mvnPretty
       (optsStdout opts)
       (mvnOpts opts <> ["install", "--projects", modPaths])
   whenSuccess result $
     forM_ mods $ \mod -> do
-      copyModule targetAssembly mod
+      copyModule (optsTargetAssembly opts) mod
       notifySend $ "rebuild \"" <> unwords mods <> "\" succeeded!"
 
-copyModule :: Maybe Assembly -> FilePath -> IO ()
+copyModule ::
+     Members '[ XmlSemantics, FileSemantics, LogSemantics, Error String] r
+  => Maybe Assembly
+  -> FilePath
+  -> Sem r ()
 copyModule targetAssemblyOpt mod = do
-  home <- getEnv "HOME"
+  home <- myGetEnv "HOME"
   version <- getVersion
   let targetAssembly = fromMaybe ("develop-" <> version) targetAssemblyOpt
       ocPath :: FilePath
@@ -197,30 +331,35 @@ copyModule targetAssemblyOpt mod = do
       to :: FilePath
       to =
         "build" </> ("opencast-dist-" <> targetAssembly) </> "system" </> ocPath
-  putStrLn $ "copying " <> from <> " to " <> to
-  copyFile from to
+  myLog $ "copying " <> from <> " to " <> to
+  myCopyFile from to
 
-partialRebuild :: String -> Opts -> IO ExitCode
-partialRebuild relativeTo opts = do
+partialRebuild ::
+     Members '[ Reader Opts, XmlSemantics, FileSemantics, Resource, Fail, LogSemantics, Error String, ProcessSemantics, PromptSemantics] r
+  => String
+  -> Sem r ExitCode
+partialRebuild relativeTo = do
   (rebuildType, mods) <- changedModules relativeTo
   fullRebuild' <-
     if rebuildType == FullRebuild
-      then prompt opts "\"pom.xml\" changed, do a full rebuild?"
+      then myPrompt "\"pom.xml\" changed, do a full rebuild?"
       else pure False
   if fullRebuild'
-    then fullRebuild opts
+    then ask >>= fullRebuild
     else do
+      opts <- ask
       result <-
         mvnPretty
           (optsStdout opts)
           (mvnOpts opts <>
            ["install", "-pl", intercalate "," (("modules" </>) <$> mods)])
       whenSuccess result $ do
-        print mods
+        myLog (show mods)
         forM_ mods (copyModule Nothing)
         notifySend "Partial rebuild complete"
 
-gitDiff :: String -> IO [String]
+gitDiff ::
+     Members '[ ProcessSemantics, Error String] r => String -> Sem r [String]
 gitDiff relativeTo =
   lines <$> safeReadProcess "git" ["diff", "--name-only", relativeTo] ""
 
@@ -229,7 +368,10 @@ data RebuildType
   | PartialRebuild
   deriving (Eq)
 
-changedModules :: String -> IO (RebuildType, [String])
+changedModules ::
+     Members '[ ProcessSemantics, Error String] r
+  => String
+  -> Sem r (RebuildType, [String])
 changedModules relativeTo = do
   gitResult <- gitDiff relativeTo
   --let takeSecond p | length p > 1 = Just (init (head p <> (p !! 1)))
@@ -253,11 +395,14 @@ mvnOpts opts =
   optStr (optsNoCheckstyle opts) "-Dcheckstyle.skip" <>
   optStr (optsClean opts) "clean"
 
-whenSuccess :: MvnResult -> IO () -> IO ExitCode
+whenSuccess :: Monad m => MvnResult -> m () -> m ExitCode
 whenSuccess MvnResultOk f = f >> pure ExitSuccess
 whenSuccess _ _ = pure (ExitFailure 1)
 
-fullRebuild :: Opts -> IO ExitCode
+fullRebuild ::
+     Members '[ LogSemantics, FileSemantics, ProcessSemantics, Resource, Fail] r
+  => Opts
+  -> Sem r ExitCode
 fullRebuild opts = do
   result <-
     mvnPretty
@@ -268,40 +413,50 @@ fullRebuild opts = do
 lastLogFileName :: FilePath
 lastLogFileName = "last-log.txt"
 
-mvnPretty :: Bool -> [String] -> IO MvnResult
+mvnPretty ::
+     Members '[ LogSemantics, FileSemantics, ProcessSemantics, Resource, Fail] r
+  => Bool
+  -> [String]
+  -> Sem r MvnResult
 mvnPretty stdout args = do
-  putStrLn ("mvn " <> unwords args)
+  myLog ("mvn " <> unwords args)
   (_, Just hout, _, processHandle) <-
-    createProcess ((proc "mvn" args) {std_out = CreatePipe})
-  errorLines <- newIORef []
-  withFile lastLogFileName WriteMode $ \lastLog -> do
-    errorCode <- mvnWithParse' hout lastLog processHandle errorLines
+    myCreateProcess ((proc "mvn" args) {std_out = CreatePipe})
+  errorLines <- myNewIORef []
+  bracket (myOpenFile lastLogFileName WriteMode) myHClose $ \lastLog -> do
+    errorCode <- mvnWithParse' stdout hout lastLog processHandle errorLines
     case errorCode of
       ExitSuccess -> pure MvnResultOk
       ExitFailure i -> do
         notifySend $ "failure (code " <> show i <> ")!"
         pure MvnResultFailure
-  where
-    mvnWithParse' ::
-         Handle -> Handle -> ProcessHandle -> IORef [String] -> IO ExitCode
-    mvnWithParse' h lastLog p errLines = do
-      eof <- hIsEOF h
-      if eof
-        then waitForProcess p
-        else do
-          line <- hGetLine h
-          hPutStrLn lastLog line
-          let lineError :: Bool
-              lineError = "[ERROR]" `isPrefixOf` line && line /= "[ERROR] "
-              lineUpdate :: Bool
-              lineUpdate = "[INFO] Building" `isPrefixOf` line
-          when lineError (putStrLn line >> modifyIORef errLines (line :))
-          when (lineUpdate || (stdout && not lineError)) (putStrLn line)
-          mvnWithParse' h lastLog p errLines
 
-createCa :: String -> IO ExitCode
+mvnWithParse' ::
+     Members '[ LogSemantics, FileSemantics, ProcessSemantics] r
+  => Bool
+  -> Handle
+  -> Handle
+  -> ProcessHandle
+  -> IORef [String]
+  -> Sem r ExitCode
+mvnWithParse' stdout h lastLog p errLines = do
+  eof <- myHIsEOF h
+  if eof
+    then myWaitForProcess p
+    else do
+      line <- myHGetLine h
+      myHPutStrLn lastLog line
+      let lineError :: Bool
+          lineError = "[ERROR]" `isPrefixOf` line && line /= "[ERROR] "
+          lineUpdate :: Bool
+          lineUpdate = "[INFO] Building" `isPrefixOf` line
+      when lineError (myLog line >> myModifyIORef errLines (line :))
+      when (lineUpdate || (stdout && not lineError)) (myLog line)
+      mvnWithParse' stdout h lastLog p errLines
+
+createCa :: Member ProcessSemantics r => String -> Sem r ExitCode
 createCa caName = do
-  callCommand $
+  myCallCommand $
     "curl -i -s -f --digest -u opencast_system_account:CHANGE_ME --request POST -H \"X-Requested-Auth: Digest\" --data state=idle 'http://localhost:8080/capture-admin/agents/" <>
     caName <> "'"
   pure ExitSuccess
@@ -313,17 +468,43 @@ main' = do
     then withFile lastLogFileName ReadMode (hGetContents >=> putStrLn) >>
          pure ExitSuccess
     else case optsCreateCa opts of
-           Just caName -> createCa caName
+           Just caName -> createCa caName & runProcessSemantics & runM
            Nothing -> do
              when
                (isJust (optsRebuildSome opts) && isJust (optsRelativeTo opts))
                (error "can't specify some rebuild and relative rebuild")
-             case optsRebuildSome opts of
-               Just x -> rebuildSome (optsTargetAssembly opts) x opts
-               _ ->
-                 case optsRelativeTo opts of
-                   Just x -> partialRebuild x opts
-                   _ -> fullRebuild opts
+             errorOrExitCode <-
+               case optsRebuildSome opts of
+                 Just x ->
+                   rebuildSome x & runXml & runReader opts & runLog &
+                   runFileSemantics &
+                   runProcessSemantics &
+                   failToError id &
+                   runError &
+                   resourceToIO &
+                   runM
+                 _ ->
+                   case optsRelativeTo opts of
+                     Just x ->
+                       partialRebuild x & runReader opts & runXml & runLog &
+                       runFileSemantics &
+                       runProcessSemantics &
+                       runPrompt opts &
+                       failToError id &
+                       runError &
+                       resourceToIO &
+                       runM
+                     _ ->
+                       fullRebuild opts & runXml & runLog & runFileSemantics &
+                       runProcessSemantics &
+                       runPrompt opts &
+                       failToError id &
+                       runError &
+                       resourceToIO &
+                       runM
+             case errorOrExitCode of
+               Left e -> error e
+               Right ec -> pure ec
 
 main :: IO ()
 main = do
