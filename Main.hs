@@ -158,7 +158,7 @@ optsParser = subparser (createCaCommand <> showLastLogCommand <> rebuildCommand)
        optional
          (words <$>
           strOption
-            (long "rebuild" <>
+            (long "modules" <>
              help "rebuild this specific modules (and dependents thereof)")) <*>
        switch (long "stdout" <> help "output stdout, too") <*>
        switch (long "yes" <> help "say \"yes\" to everything") <*>

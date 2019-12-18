@@ -28,25 +28,62 @@ Without it…well, it’s not possible.
 
 Your working directory has to be the Opencast root directory. Then just call it, possibly with =--help= to discover its options. They should be self-explanatory:
 
+*** Global
+
 #+begin_example
-Usage: octool [--relative-to ARG] [--rebuild ARG] [--create-ca ARG]
-              [--target-assembly ARG] [--clean] [--stdout] [--show-last-log]
-              [--yes] [--no] [--no-checkstyle] [--no-tests]
+Usage: octool COMMAND
+
+Available options:
+  -h,--help                Show this help text
+
+Available commands:
+  create-ca                create a new capture agent
+  show-last-log            show the last (re-)build log
+  rebuild                  rebuild parts of (or all of) Opencast
+#+end_example
+
+*** =create-ca=
+
+#+begin_example
+Usage: octool create-ca --create-ca ARG
+  create a new capture agent
+
+Available options:
+  --create-ca ARG          create a capture agent on the locally running
+                           instance
+  -h,--help                Show this help text
+#+end_example
+
+*** =show-last-log=
+
+#+begin_example
+Usage: octool show-last-log
+  show the last (re-)build log
+
+Available options:
+  -h,--help                Show this help text
+#+end_example
+
+*** =rebuild=
+
+#+begin_example
+Usage: octool rebuild [--relative-to ARG] [--clean] [--modules ARG] [--stdout]
+                      [--yes] [--no] [--no-checkstyle] [--no-tests]
+                      [--target-assembly ARG]
+  rebuild parts of (or all of) Opencast
 
 Available options:
   --relative-to ARG        rebuild only modules changed since the version
                            specified
-  --rebuild ARG            rebuild this specific modules (and dependents
-                           thereof)
-  --create-ca ARG          create a capture agent on the locally running
-                           instance
-  --target-assembly ARG    use the specified assembly instead of develop
   --clean                  clean before build
+  --modules ARG            rebuild this specific modules (and dependents
+                           thereof)
   --stdout                 output stdout, too
-  --show-last-log          show last log
   --yes                    say "yes" to everything
   --no                     say "no" to everything
   --no-checkstyle          disable checkstyle
   --no-tests               disable tests
+  --target-assembly ARG    use the specified assembly instead of develop
   -h,--help                Show this help text
 #+end_example
+
